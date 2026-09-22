@@ -2,8 +2,9 @@
 /* eslint-disable react/no-unescaped-entities */
 
 import { useEffect, useMemo, useState } from "react";
-import type { Session } from "@supabase/supabase-js";
-import { supabase } from "@/lib/supabase-browser";
+import type { User } from "firebase/auth";
+import { createUserWithEmailAndPassword, onAuthStateChanged, signInWithEmailAndPassword, signOut, updateProfile } from "firebase/auth";
+import { firebaseAuth, firebaseConfigured } from "@/lib/firebase";
 import { Archive, Bell, BookOpen, CalendarDays, Check, ChevronRight, CircleHelp, ClipboardCheck, Home as HomeIcon, Menu, MoreHorizontal, PanelLeftClose, Plus, Search, Settings, Sparkles, Target, Users, X } from "lucide-react";
 
 type Section = "home" | "calendar" | "tasks" | "tests" | "more";
@@ -22,8 +23,8 @@ const navItems: { id: Section; label: string; icon: typeof HomeIcon }[] = [
 function SubjectDot({ color }: { color: string }) { return <span className="subject-dot" style={{ background: color }} />; }
 
 export default function Home() {
-  const [session, setSession] = useState<Session | null>(null);
-  const [authLoading, setAuthLoading] = useState(true);
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(firebaseConfigured);
   const [section, setSection] = useState<Section>("home");
   const [tasks, setTasks] = useState(initialTasks);
   const [quickAdd, setQuickAdd] = useState(false);
@@ -32,19 +33,20 @@ export default function Home() {
   const [toast, setToast] = useState("");
   const [newTitle, setNewTitle] = useState("");
   useEffect(() => {
-    void supabase.auth.getSession().then(({ data }) => {
-      setSession(data.session);
+    if (!firebaseConfigured || !firebaseAuth) {
+      return;
+    }
+    return onAuthStateChanged(firebaseAuth, (nextUser) => {
+      setUser(nextUser);
       setAuthLoading(false);
     });
-    const { data: listener } = supabase.auth.onAuthStateChange((_event, nextSession) => setSession(nextSession));
-    return () => listener.subscription.unsubscribe();
   }, []);
   const filteredTasks = useMemo(() => tasks.filter((task) => `${task.subject} ${task.title}`.toLowerCase().includes(search.toLowerCase())), [tasks, search]);
   const toggleTask = (id: number) => setTasks((current) => current.map((task) => task.id === id ? { ...task, completed: !task.completed } : task));
   const addTask = () => { if (!newTitle.trim()) return; setTasks((current) => [...current, { id: Date.now(), subject: "Geometry", title: newTitle.trim(), due: "Tomorrow", time: "11:59 PM", priority: "Medium", color: "#4f7cff", completed: false }]); setNewTitle(""); setQuickAdd(false); setToast("Homework added successfully."); window.setTimeout(() => setToast(""), 2800); };
 
   if (authLoading) return <div className="auth-loading">Checking your classroom session...</div>;
-  if (!session) return <AuthScreen />;
+  if (!user) return <AuthScreen />;
 
   return <div className="app-shell">
     <aside className={`sidebar ${sidebar ? "" : "collapsed"}`}>
@@ -54,7 +56,7 @@ export default function Home() {
       <div className="sidebar-bottom">{sidebar && <div className="role-card"><div className="role-icon"><Users size={16} /></div><div><strong>Student view</strong><span>Shared class space</span></div></div>}<button className="settings-button"><Settings size={17} /><span>{sidebar && "Settings"}</span></button><button className="sidebar-toggle" onClick={() => setSidebar(!sidebar)}>{sidebar ? <PanelLeftClose size={17} /> : <Menu size={17} />}<span>{sidebar && "Collapse"}</span></button></div>
     </aside>
     <main className="main-content">
-      <header className="topbar"><div className="mobile-brand"><div className="brand-mark"><BookOpen size={17} /></div><strong>Classroom</strong></div><div className="search-wrap"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search classwork..." aria-label="Search classwork" />{search && <button onClick={() => setSearch("")} aria-label="Clear search"><X size={14} /></button>}<kbd>⌘ K</kbd></div><div className="top-actions"><button className="icon-button" aria-label="Notifications"><Bell size={18} /><i /></button><button className="profile" onClick={() => void supabase.auth.signOut()} title="Sign out"><div className="profile-avatar">{(session.user.user_metadata.name ?? session.user.email ?? "U").slice(0, 2).toUpperCase()}</div><span>{session.user.user_metadata.name ?? session.user.email}</span><ChevronRight size={14} /></button></div></header>
+      <header className="topbar"><div className="mobile-brand"><div className="brand-mark"><BookOpen size={17} /></div><strong>Classroom</strong></div><div className="search-wrap"><Search size={17} /><input value={search} onChange={(event) => setSearch(event.target.value)} placeholder="Search classwork..." aria-label="Search classwork" />{search && <button onClick={() => setSearch("")} aria-label="Clear search"><X size={14} /></button>}<kbd>⌘ K</kbd></div><div className="top-actions"><button className="icon-button" aria-label="Notifications"><Bell size={18} /><i /></button><button className="profile" onClick={() => firebaseAuth && void signOut(firebaseAuth)} title="Sign out"><div className="profile-avatar">{(user.displayName ?? user.email ?? "U").slice(0, 2).toUpperCase()}</div><span>{user.displayName ?? user.email}</span><ChevronRight size={14} /></button></div></header>
       <div className="page-wrap">{section === "home" && <HomeView tasks={filteredTasks} toggleTask={toggleTask} onQuickAdd={() => setQuickAdd(true)} />}{section === "tasks" && <ListView title="Tasks" eyebrow="Classwork" tasks={filteredTasks} toggleTask={toggleTask} onQuickAdd={() => setQuickAdd(true)} />}{section === "tests" && <TestsView />}{section === "calendar" && <CalendarView />}{section === "more" && <MoreView />}</div>
     </main>
     <button className="quick-add" onClick={() => setQuickAdd(true)}><Plus size={19} /><span>Quick add</span></button>
@@ -74,12 +76,19 @@ function AuthScreen() {
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     setLoading(true); setMessage("");
-    const result = mode === "login"
-      ? await supabase.auth.signInWithPassword({ email, password })
-      : await supabase.auth.signUp({ email, password, options: { data: { name } } });
-    setLoading(false);
-    if (result.error) setMessage(result.error.message);
-    else if (mode === "signup" && !result.data.session) setMessage("Check your email to confirm your account.");
+    try {
+      if (!firebaseConfigured || !firebaseAuth) throw new Error("Firebase environment variables are not configured yet.");
+      if (mode === "login") {
+        await signInWithEmailAndPassword(firebaseAuth, email, password);
+      } else {
+        const credentials = await createUserWithEmailAndPassword(firebaseAuth, email, password);
+        if (name.trim()) await updateProfile(credentials.user, { displayName: name.trim() });
+      }
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : "Unable to complete authentication.");
+    } finally {
+      setLoading(false);
+    }
   };
   return <main className="auth-page"><section className="auth-card"><div className="auth-logo"><BookOpen size={22} /></div><span className="eyebrow">Class 9B · Shared classroom</span><h1>{mode === "login" ? "Welcome back" : "Join your class"}</h1><p>{mode === "login" ? "Sign in to see what is happening in Class 9B." : "Create your student account to join Class 9B."}</p><form onSubmit={submit}>{mode === "signup" && <label>Name<input required value={name} onChange={(event) => setName(event.target.value)} placeholder="Your name" /></label>}<label>Email<input required type="email" value={email} onChange={(event) => setEmail(event.target.value)} placeholder="you@example.com" /></label><label>Password<input required minLength={6} type="password" value={password} onChange={(event) => setPassword(event.target.value)} placeholder="At least 6 characters" /></label>{message && <div className="auth-message">{message}</div>}<button className="primary-button auth-submit" disabled={loading}>{loading ? "Please wait..." : mode === "login" ? "Sign in" : "Create account"}</button></form><button className="auth-switch" onClick={() => { setMode(mode === "login" ? "signup" : "login"); setMessage(""); }}>{mode === "login" ? "Need an account? Create one" : "Already have an account? Sign in"}</button></section></main>;
 }
